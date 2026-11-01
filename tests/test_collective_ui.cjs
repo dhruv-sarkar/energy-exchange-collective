@@ -825,7 +825,7 @@ test('a declined conversation remains inspectable as a dashed connection at the 
   f.evaluate(`
     state.result.world.agents=[{id:'A17',role:'seller',min_price:6},{id:'A02',role:'buyer'}];
     state.view='intervention';state.stage='final';state.index=state.result.intervention.events.length-1;
-    state.mapMode='agreements';
+    state.mapMode='agreements';state.storyFocused=true;
     state.story={seller:'A17',buyer:'A02',outcome:'Declined',last:{actor:'A02',counterparty:'A17',terms:{quantity_kwh:.5}}};
     drawGraph($('graph'),frameTrades(),{type:'terminated'},'After');
   `);

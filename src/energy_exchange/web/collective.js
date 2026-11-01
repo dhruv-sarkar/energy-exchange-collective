@@ -84,7 +84,7 @@ async function run(intervention = null) {
     $('export-preview').hidden=true;$('export-text').value='';
     state.interventionRoots = !intervention ? [] : intervention.scenario==='shock' ? result.world.agents.filter(a=>a.role==='seller').map(a=>a.id) : [intervention.agent_id];
     state.view = intervention && result.intervention ? 'intervention' : 'baseline';
-    state.causal.clear(); state.storyKind=null; state.storyId=null; state.story=null; state.storyMarkup=null; state.stage=null; state.mapMode='animation'; state.history=null; clearDraft(); $('graph-loading').hidden=true;
+    state.causal.clear(); state.storyFocused=false; state.storyKind=null; state.storyId=null; state.story=null; state.storyMarkup=null; state.stage=null; state.mapMode='animation'; state.history=null; clearDraft(); $('graph-loading').hidden=true;
     initializeAgents(); rebuildFrames(); state.index=Math.max(0,currentEvents().length-1);
     render(); notify(intervention ? 'Your change is ready. Watch the negotiations or compare the agreements.' : '');
     $('instruction-help').textContent='Choose an example, then edit the amount.';
@@ -352,7 +352,7 @@ function renderReplayContext() {
   const rows=ordered.map(d=>`<tr><th scope="row"><span class="change-tag ${d.kind}">${label(d.kind)}</span><button class="pair-select" data-home="${esc(d.seller)}" data-pair="${esc(d.key)}">${esc(homeLabel(d.seller))} → ${esc(homeLabel(d.buyer))}</button></th><td>${esc(ledgerTerms(d.before))}</td><td>${esc(ledgerTerms(d.after))}</td></tr>`);
   const table=items=>`<div class="table-scroll"><table><thead><tr><th>Trading pair</th><th>Before</th><th>${ended?'After':'At this step'}</th></tr></thead><tbody>${items.join('')}</tbody></table></div>`;
   box.innerHTML=`<h3>What changed ${ended?'by the end':'at this step'}?</h3><p class="helper">Compared with the original agreements. Select a pair to highlight it.</p>${rows.length?table(rows.slice(0,3))+(rows.length>3?`<details><summary>Show ${rows.length-3} more changed pairs</summary>${table(rows.slice(3))}</details>`:''):'<p>No agreement differences at this step.</p>'}`;
-  box.querySelectorAll('[data-home]').forEach(b=>b.onclick=()=>{state.selected=b.dataset.home;state.focusedPair=b.dataset.pair;renderFrame();});
+  box.querySelectorAll('[data-home]').forEach(b=>b.onclick=()=>{state.selected=b.dataset.home;state.focusedPair=b.dataset.pair;state.storyFocused=false;renderFrame();});
 }
 function renderImpactSummary() {
   if(state.result?.intervention?.status==='unresolved'){$('impact-summary').innerHTML='';return;}
@@ -403,7 +403,7 @@ function renderStories() {
   const box=$('negotiation-stories'),detail=$('story-detail');
   const intervention=state.view!=='baseline'&&state.stage!=='starting'&&state.result?.intervention;
   box.hidden=!intervention;detail.hidden=!intervention;
-  if(!intervention){state.story=null;state.storyId=null;state.storyMarkup=null;return;}
+  if(!intervention){state.storyFocused=false;state.story=null;state.storyId=null;state.storyMarkup=null;return;}
   const cards=EnergyReplay.visible(state.history?.cards || EnergyReplay.messages(currentEvents(),state.result.world,state.result.updated_world),state.index);
   const stories=EnergyReplay.stories(cards,state.result.baseline.trades,agents());
   if(!stories.some(s=>s.kind===state.storyKind))state.storyKind=stories[0]?.kind;
@@ -416,19 +416,19 @@ function renderStories() {
   }).join('')}</div>${!stories.length?'<p>No negotiations yet at this replay step.</p>':''}`;
   if(html!==state.storyMarkup){
     const expanded=[...box.querySelectorAll('details[open]')].map(d=>d.parentElement.querySelector('h4')?.textContent);
-    const focused=document.activeElement?.dataset?.story;
+    const focused=document.activeElement?.dataset?.story,focusedKind=document.activeElement?.dataset?.storyKind;
     box.innerHTML=html;state.storyMarkup=html;
     box.querySelectorAll('details').forEach(d=>{d.open=expanded.includes(d.parentElement.querySelector('h4')?.textContent);});
-    box.querySelectorAll('[data-story-kind]').forEach(b=>{b.onclick=()=>{stop();state.storyKind=b.dataset.storyKind;state.storyId=null;state.mapMode='agreements';renderFrame();};});
+    box.querySelectorAll('[data-story-kind]').forEach(b=>{b.onclick=()=>{stop();state.storyKind=b.dataset.storyKind;selectStory(null);};if(b.dataset.storyKind===focusedKind)b.focus();});
     box.querySelectorAll('[data-story]').forEach(b=>{b.onclick=()=>selectStory(b.dataset.story);if(b.dataset.story===focused)b.focus();});
   }
-  const s=state.story;if(!s){detail.innerHTML='<p>Messages will appear here as the simulation proceeds.</p>';return;}
-  const explanation=s.kind==='disrupted'?'An existing agreement was released during this run. The recorded reason appears below.':s.kind==='renegotiated'?'These homes had an original agreement and exchanged terms again.':s.kind==='replacement'?'After this buyer had an agreement released, it approached another seller.':'These homes explored a trade during this run.';
+  const s=state.story;if(!s){detail.innerHTML='<p>Messages will appear here as the simulation proceeds.</p>';state.storyDetailMarkup=null;state.storyDetailId=null;return;}
+  const explanation=s.kind==='disrupted'?'An existing agreement was released during this run. The recorded reason appears below.':s.kind==='renegotiated'?'These homes had an original agreement and exchanged terms again.':s.kind==='replacement'?'After this buyer had an agreement released, these homes explored a new trade.':'These homes explored a trade during this run.';
   const detailHTML=`<span class="eyebrow">${esc(storyKinds[s.kind])}</span><h3>${esc(homeLabel(s.buyer))} ↔ ${esc(homeLabel(s.seller))}</h3><p>${explanation}</p><div class="story-consequence"><strong>${esc(s.outcome)}</strong><p>${esc(storyConsequence(s))}</p></div><p class="helper">Recorded offers below show quantity, price and delivery time. A declined offer is not an energy trade.</p><details class="story-messages"><summary>Read ${s.cards.length} recorded messages</summary>${s.cards.map(historyEntry).join('')}</details>`;
   if(detailHTML!==state.storyDetailMarkup){const open=state.storyDetailId===s.id&&detail.querySelector?.('details')?.open;detail.innerHTML=detailHTML;const messages=detail.querySelector?.('details');if(messages)messages.open=!!open;state.storyDetailMarkup=detailHTML;state.storyDetailId=s.id;}
 }
 function selectStory(id) {
-  stop();state.storyId=id;state.hoveredPair=null;state.mapMode='agreements';
+  stop();state.storyId=id;state.storyFocused=true;state.hoveredPair=null;state.mapMode='agreements';
   renderStories();
   if(state.story){state.selected=state.story.buyer;state.focusedPair=`${state.story.seller}|${state.story.buyer}`;$('inspect-select').value=state.selected;}
   renderFrame();$('graph-wrap').scrollIntoView?.({block:'start',behavior:'smooth'});
@@ -467,7 +467,7 @@ function updateTown() {
   if(!state.town&&typeof window!=='undefined'&&window.EnergyTown)state.town=window.EnergyTown.mount($('energy-town'),{
     onIndex(index){if(!state.townPlaying)return;state.index=index;renderFrame();},
     onStop(){stop();},
-    onSelect(id){state.selected=id;state.focusedPair=null;$('inspect-select').value=id;renderFrame();}
+    onSelect(id){state.selected=id;state.focusedPair=null;state.storyFocused=false;$('inspect-select').value=id;renderFrame();}
   });
   const showTown=!!state.town&&state.view!=='compare'&&state.mapMode!=='agreements';
   $('energy-town').hidden=!showTown;$('graph').toggleAttribute('hidden',showTown);
@@ -571,6 +571,7 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
     const from=Array.isArray(item)?item[0]:item.source || item.seller_id || item.from,to=Array.isArray(item)?item[1]:item.target || item.buyer_id || item.to;
     edge(from,to,{stroke:'#cbd4c0','stroke-width':.7,'stroke-dasharray':'3 6',opacity:.3});
   }
+  const story=state.storyFocused?state.story:null;
   const original=svg===$('compare-graph'),showDiffs=state.view!=='baseline'&&!!state.result?.intervention;
   if(showDiffs&&!original)for(const d of diffs.filter(d=>d.kind==='removed'))edge(d.seller,d.buyer,{stroke:'#a14738','stroke-width':3,'stroke-dasharray':'6 5',opacity:.8,'marker-end':`url(#${markerPrefix}-release)`,'aria-label':`${d.seller} to ${d.buyer}: removed agreement`});
   for(const t of trades) {
@@ -578,15 +579,15 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
     const active=[t.seller_id,t.buyer_id].includes(state.selected),affected=delta.affected.has(t.seller_id)||delta.affected.has(t.buyer_id);
     if(only&&!affected)continue;
     const description=`${t.seller_id} → ${t.buyer_id}: ${fmt(t.quantity_kwh)} kWh at ₹${fmt(t.price)}/kWh · ${deliveryWindow(t)}`;
-    const path=edge(t.seller_id,t.buyer_id,{stroke:kind==='removed'?'#a14738':kind==='revised'?'#ae650f':kind==='new'?'#127568':active?'#315d49':'#a6b995','stroke-width':kind?3.5:active?2.5:1,'stroke-dasharray':kind==='removed'?'6 5':'none',opacity:(state.story&&state.mapMode==='agreements'&&!original)? .15 :(kind || active) ? .95 : showDiffs ? .18 : .55,'marker-end':`url(#${markerPrefix}-${kind==='removed'?'release':kind==='new'?'new':kind==='revised'?'revised':'agreement'})`,class:'trade-edge',tabindex:0,role:'button','aria-label':description});
+    const path=edge(t.seller_id,t.buyer_id,{stroke:kind==='removed'?'#a14738':kind==='revised'?'#ae650f':kind==='new'?'#127568':active?'#315d49':'#a6b995','stroke-width':kind?3.5:active?2.5:1,'stroke-dasharray':kind==='removed'?'6 5':'none',opacity:(story&&state.mapMode==='agreements'&&!original)? .15 :(kind || active) ? .95 : showDiffs ? .18 : .55,'marker-end':`url(#${markerPrefix}-${kind==='removed'?'release':kind==='new'?'new':kind==='revised'?'revised':'agreement'})`,class:'trade-edge',tabindex:0,role:'button','aria-label':description});
     if(path) {
       svgEl('title',{},path,description);
-      const inspect=()=>{state.selected=t.seller_id;state.focusedPair=tradeKey(t);$('inspect-select').value=state.selected;notify(description);renderFrame();};
+      const inspect=()=>{state.selected=t.seller_id;state.focusedPair=tradeKey(t);state.storyFocused=false;$('inspect-select').value=state.selected;notify(description);renderFrame();};
       path.addEventListener('click',inspect);path.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();inspect();}});
     }
   }
   const focused=diffs.find(d=>d.key===state.focusedPair)||diffs.find(d=>[d.seller,d.buyer].includes(state.selected));
-  if(focused&&!(state.story&&state.mapMode==='agreements'&&!original)) {
+  if(focused&&!(story&&state.mapMode==='agreements'&&!original)) {
     const p=pos.get(focused.seller),q=pos.get(focused.buyer);
     if(p&&q){const x=(p.x+q.x)/2+18,y=(p.y+q.y)/2-18;
       // Payments are rounded totals; use recorded quotes for unit prices.
@@ -607,7 +608,6 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
     const kind=release?'release':message?'message':'agreement';
     edge(e.actor_id,e.counterparty_id,{stroke:release?'#a14738':message?'#79548f':'#315d49','stroke-width':2.5,'stroke-dasharray':message?'7 5':release?'3 4':'none','marker-end':`url(#${markerPrefix}-${kind})`,class:`event-edge ${message?'message-edge':release?'event-release':'event-accept'}`,opacity:.95});
   }
-  const story=state.story;
   if(story&&!original&&state.mapMode==='agreements'){
     const c=story.cards?.findLast(c=>['offer_sent','counteroffer_sent','offer_accepted','offer_rejected'].includes(c.type)) || story.last,p=pos.get(c.actor),q=pos.get(c.counterparty);
     const overlayLabel=story.outcome==='Agreement recorded'&&c.type==='offer_accepted'?'Accepted terms':story.outcome;
@@ -621,7 +621,7 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
   for(const a of world?.agents || []) {
     const point=pos.get(a.id);if(!point)continue;
     const affected=delta.affected.has(a.id),selected=a.id===state.selected,own=a.id===state.controlled,active=activeParties.has(a.id);
-    const match=(!search||`${a.id} ${a.name}`.toLowerCase().includes(search))&&($('role-filter').value==='all'||$('role-filter').value===a.role),dim=!match||(only&&!affected&&!own)||!!((state.hoveredPair||(state.story&&state.mapMode==='agreements'))&&!active);
+    const match=(!search||`${a.id} ${a.name}`.toLowerCase().includes(search))&&($('role-filter').value==='all'||$('role-filter').value===a.role),dim=!match||(only&&!affected&&!own)||!!((state.hoveredPair||(story&&state.mapMode==='agreements'))&&!active);
     const availability=householdAvailability(a,trades);
     const g=svgEl('g',{transform:`translate(${point.x} ${point.y})`,class:`node${affected?' changed-node':''}${active?' active-party':''}${own?' controlled-node':''}${selected?' inspected-node':''}`,'data-agent':a.id,tabindex:0,role:'button','aria-label':`Inspect ${a.id}, ${a.name || ''}, ${a.role}. ${availability}${affected?', affected':''}`,opacity:dim?.15:1},nodes);
     if(active)svgEl('circle',{r:28,fill:'#ede4f3',stroke:'#79548f','stroke-width':1.5},g);
@@ -632,7 +632,7 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
     if(own)svgEl('text',{'text-anchor':'middle',y:3,fill:'white','font-size':9,'font-weight':600},g,'✦');
     svgEl('text',{'text-anchor':'middle',...labels.get(a.id),fill:'#314b36','font-size':11/textScale,'font-weight':own?700:500,class:'node-label'},g,a.id);
     svgEl('title',{},g,`${a.id} · ${a.name || 'Home'} · ${a.role} · ${availability}`);
-    const inspect=()=>{state.selected=a.id;state.focusedPair=null;$('inspect-select').value=a.id;renderFrame();};
+    const inspect=()=>{state.selected=a.id;state.focusedPair=null;state.storyFocused=false;$('inspect-select').value=a.id;renderFrame();};
     g.addEventListener('click',inspect);g.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();inspect();}});
   }
 }
@@ -786,14 +786,14 @@ function stop(){clearInterval(state.timer);state.timer=null;state.townPlaying=fa
 function play(){if(state.view==='compare'){state.view='intervention';document.querySelectorAll('[data-view]').forEach(b=>{const selected=b.dataset.view===state.view;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',selected);});}state.mapMode='animation';state.stage=null;if(state.timer||state.townPlaying){stop();return;}if(!currentEvents().length)return;$('replay-caption').setAttribute('aria-live','off');if(state.index>=currentEvents().length-1)state.index=0;$('play').textContent='Ⅱ Pause';$('play').setAttribute('aria-label','Pause the simulation');state.townPlaying=!!state.town;renderFrame();if(state.town)return;state.timer=setInterval(()=>{if(state.index>=currentEvents().length-1){stop();return;}state.index++;renderFrame();},1400/Number($('speed').value));}
 function download(name,text,type){if(state.exportURL)URL.revokeObjectURL(state.exportURL);state.exportURL=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=state.exportURL;a.download=name;a.textContent=`Download ${name}`;notify('Your export is ready. ');$('notice').append(a);$('export-title').textContent=`View or copy ${name}`;$('export-text').value=text;$('export-preview').hidden=false;$('notice').scrollIntoView?.({block:'nearest'});}
 function exportLedger(){const q=s=>`"${String(s??'').replaceAll('"','""')}"`;const columns=['run','id','seller_id','buyer_id','quantity_kwh','price','payment','status','delivery_start','delivery_end'];const rows=[columns.join(',')];for(const name of ['baseline','intervention'])for(const t of state.result[name]?.trades||[])rows.push([name,...columns.slice(1).map(k=>t[k])].map(q).join(','));download('energy-trade-ledger.csv',rows.join('\n'),'text/csv');}
-function bindPan(svg){let drag=null;svg.addEventListener('pointerdown',e=>{if(e.target.closest('.trade-edge'))return;const node=e.target.closest('.node'),id=node?.getAttribute('data-agent'),origin=id?(state.nodeOffsets[id]||{x:0,y:0}):state.pan;drag={x:e.clientX,y:e.clientY,px:origin.x,py:origin.y,id};if(id){state.selected=id;state.focusedPair=null;$('inspect-select').value=id;}});svg.addEventListener('pointermove',e=>{if(!drag||Math.hypot(e.clientX-drag.x,e.clientY-drag.y)<4)return;if(!drag.moved)svg.setPointerCapture(e.pointerId);drag.moved=true;const rect=svg.getBoundingClientRect(),scale=1/Math.min(rect.width/880,rect.height/610)/(drag.id?state.zoom:1),next={x:drag.px+(e.clientX-drag.x)*scale,y:drag.py+(e.clientY-drag.y)*scale};if(drag.id)state.nodeOffsets[drag.id]=next;else state.pan=next;renderFrame();});svg.addEventListener('pointerup',()=>{const selected=drag?.id,moved=drag?.moved;drag=null;if((selected||moved)&&state.result)renderFrame();});svg.addEventListener('pointercancel',()=>drag=null);}
+function bindPan(svg){let drag=null;svg.addEventListener('pointerdown',e=>{if(e.target.closest('.trade-edge'))return;const node=e.target.closest('.node'),id=node?.getAttribute('data-agent'),origin=id?(state.nodeOffsets[id]||{x:0,y:0}):state.pan;drag={x:e.clientX,y:e.clientY,px:origin.x,py:origin.y,id};if(id){state.selected=id;state.focusedPair=null;state.storyFocused=false;$('inspect-select').value=id;}});svg.addEventListener('pointermove',e=>{if(!drag||Math.hypot(e.clientX-drag.x,e.clientY-drag.y)<4)return;if(!drag.moved)svg.setPointerCapture(e.pointerId);drag.moved=true;const rect=svg.getBoundingClientRect(),scale=1/Math.min(rect.width/880,rect.height/610)/(drag.id?state.zoom:1),next={x:drag.px+(e.clientX-drag.x)*scale,y:drag.py+(e.clientY-drag.y)*scale};if(drag.id)state.nodeOffsets[drag.id]=next;else state.pan=next;renderFrame();});svg.addEventListener('pointerup',()=>{const selected=drag?.id,moved=drag?.moved;drag=null;if((selected||moved)&&state.result)renderFrame();});svg.addEventListener('pointercancel',()=>drag=null);}
 $('config-form').onsubmit=e=>{e.preventDefault();state.zoom=1;state.pan={x:0,y:0};state.nodeOffsets={};run();};
 for(const id of ['population','topology','seed','max-rounds','max-messages','cap','memory','price-tick','negotiation-mode'])$(id).addEventListener('change',invalidate);
 $('instruction').addEventListener('input',()=>{const hadDraft=!!state.draft;clearDraft();setBusy(state.busy);if(hadDraft)$('instruction-help').textContent='Your instruction changed. Review it again before applying.';});
 $('policy-value').addEventListener('input',clearDraft);
 $('policy-field').addEventListener('change',clearDraft);
-$('controlled').onchange=()=>{state.controlled=$('controlled').value;state.selected=state.controlled;state.focusedPair=null;$('inspect-select').value=state.selected;clearDraft();state.causal.clear();render();};
-$('inspect-select').onchange=()=>{state.selected=$('inspect-select').value;state.focusedPair=null;renderFrame();};
+$('controlled').onchange=()=>{state.controlled=$('controlled').value;state.selected=state.controlled;state.focusedPair=null;state.storyFocused=false;$('inspect-select').value=state.selected;clearDraft();state.causal.clear();render();};
+$('inspect-select').onchange=()=>{state.selected=$('inspect-select').value;state.focusedPair=null;state.storyFocused=false;renderFrame();};
 $('parse').onclick=()=>preview();
 $('structured').onclick=()=>{const v=$('policy-value').value,f=$('policy-field').value,phrases={min_price:`Set my minimum price to INR ${v}`,max_price:`Set my maximum price to INR ${v}`,max_offer_kwh:`Sell up to ${v} kWh`,forecast_surplus_kwh:`Set my surplus to ${v} kWh`,reserve_kwh:`Keep ${v} kWh in reserve`,budget:`Set my budget to INR ${v}`,demand_kwh:`Buy ${v} kWh`,deadline_round:`Set my deadline to round ${v}`};$('instruction').value=phrases[f];preview(phrases[f]);};
 document.querySelectorAll('[data-example-index]').forEach(b=>b.onclick=()=>useExample(Number(b.dataset.exampleIndex)));
