@@ -609,9 +609,10 @@ function drawGraph(svg,trades,event,caption,world=frameWorld()) {
   }
   const story=state.story;
   if(story&&!original&&state.mapMode==='agreements'){
-    const c=story.last,p=pos.get(c.actor),q=pos.get(c.counterparty);
-    edge(c.actor,c.counterparty,{stroke:'#79548f','stroke-width':4,'stroke-dasharray':'8 6','marker-end':`url(#${markerPrefix}-message)`,class:'story-message-edge','aria-label':`${c.actor} to ${c.counterparty}: ${story.outcome}, ${fmt(c.terms.quantity_kwh)} kWh`});
-    if(p&&q){const text=`${story.outcome} · ${fmt(c.terms.quantity_kwh)} kWh`,width=(text.length*6.7+20)/textScale,x=Math.max(width/2+12,Math.min(868-width/2,(p.x+q.x)/2)),y=(p.y+q.y)/2-48;
+    const c=story.cards?.findLast(c=>['offer_sent','counteroffer_sent','offer_accepted','offer_rejected'].includes(c.type)) || story.last,p=pos.get(c.actor),q=pos.get(c.counterparty);
+    const overlayLabel=story.outcome==='Agreement recorded'&&c.type==='offer_accepted'?'Accepted terms':story.outcome;
+    edge(c.actor,c.counterparty,{stroke:'#79548f','stroke-width':4,'stroke-dasharray':'8 6','marker-end':`url(#${markerPrefix}-message)`,class:'story-message-edge','aria-label':`${c.actor} to ${c.counterparty}: ${overlayLabel}, ${fmt(c.terms.quantity_kwh)} kWh`});
+    if(p&&q){const text=`${overlayLabel} · ${fmt(c.terms.quantity_kwh)} kWh`,width=(text.length*6.7+20)/textScale,x=Math.max(width/2+12,Math.min(868-width/2,(p.x+q.x)/2)),y=(p.y+q.y)/2-48;
       svgEl('rect',{x:x-width/2,y:y-20/textScale,width,height:28/textScale,rx:7,fill:'#fbf5ff',stroke:'#79548f'},root);
       svgEl('text',{x,y,'text-anchor':'middle','font-size':12/textScale,fill:'#613677','font-weight':700},root,text);
     }
