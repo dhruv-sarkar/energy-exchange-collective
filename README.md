@@ -18,6 +18,8 @@ Follow the recorded result through starting agreements, the revised requirement,
 
 The default method uses bargaining with recorded price strategies. When configured, OpenAI prepares those strategies and helps translate instructions. Clear supported instructions use a free grammar path. The workspace reports rules-based fallback when the model is unavailable, and asks for clarification when a requirement is ambiguous. Every change needs confirmation.
 
+Households also have flexible preferences for price, delivery time, and the amount traded. A counteroffer can change any of those terms. A household might offer a lower price at a preferred time, or accept an inconvenient time when the price compensates for it. The history marks what changed and explains the recorded trade-off. Select a home to see its flexible preferences separately from its firm limits.
+
 ## Run locally
 
 ```bash
