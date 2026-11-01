@@ -689,7 +689,7 @@ class _Run:
 
     # -- proposals --
 
-    def _proposal(self, mover, partner, drop, partner_drop, delivery=None):
+    def _proposal(self, mover, partner, drop, partner_drop, delivery=None, quantity=None):
         """One candidate proposal, or None. Public information only, except
         the mover's own private fields."""
         m, c = self.agents[mover], self.agents[partner]
@@ -704,6 +704,8 @@ class _Run:
         if cap_free <= 0:
             return {"blocked": "cap_exhausted"}
         q = min(m_free, c_free, cap_free)
+        if quantity is not None:
+            q = min(q, quantity)
         bundle = False
         delivery_start = delivery[0] if delivery else None
         regular_floor = effective_floor_paise(dict(s, cond=None), q, delivery_start)
@@ -711,9 +713,25 @@ class _Run:
         if price is None and mover == seller and s["cond"] and q >= s["cond"][1]:
             price = price_paise(s["cond"][0], b["maximum"], self.tick)
             bundle = price is not None
-        if price is None:
+        packages = self.cfg['negotiation_mode'] == 'bargaining' and (m['preferences'] or c['preferences'])
+        if packages:
+            for _ in range(4):
+                floor = effective_floor_paise(s, q, delivery_start)
+                price = preference_quote(m, floor, b['maximum'], self.tick,
+                    self.plan['agents'][mover]['price_positions'][0], q, delivery)
+                if price is None:
+                    return None
+                if mover != buyer:
+                    break
+                budget = self.free_budget(buyer) + (drop['payment'] if drop else 0)
+                bounded = min(q, affordable_wh(budget, price))
+                if bounded == q:
+                    break
+                q = bounded
+            bundle = bool(s['cond'] and q >= s['cond'][1] and price < regular_floor)
+        elif price is None:
             return None
-        if self.cfg["negotiation_mode"] == "bargaining":
+        elif self.cfg["negotiation_mode"] == "bargaining":
             floor = effective_floor_paise(s, q, delivery_start)
             price = quote_price(floor, b["maximum"], self.tick,
                                 self.plan["agents"][mover]["price_positions"][0])
@@ -727,7 +745,10 @@ class _Run:
         gain = self.surplus(mover, q, price, delivery_start, delivery[1] if delivery else None) - (self.trade_surplus(mover, drop) if drop else 0)
         if gain < EPSILON_RAW:
             return None
-        partner_gain = self.surplus(partner, q, price, delivery_start, delivery[1] if delivery else None) - (
+        # A first offer may miss a soft preference. Check whether a mutually
+        # useful price is possible, then let the actual exchange decide.
+        partner_price = (b['maximum'] if c['role']=='seller' else effective_floor_paise(s,q,delivery_start)) if packages else price
+        partner_gain = self.surplus(partner, q, partner_price, delivery_start, delivery[1] if delivery else None) - (
             self.trade_surplus(partner, partner_drop) if partner_drop else 0)
         if partner_gain < (EPSILON_RAW if partner_drop else 0):
             return None
@@ -742,11 +763,30 @@ class _Run:
                 *(p["delivery"] or (None, None)), self.plan_hash)
 
     def proposals(self, mover, partner, drop, partner_drop):
+        if self.cfg['negotiation_mode']=='bargaining' and any(self.agents[a]['preferences'] for a in (mover,partner)):
+            for delivery in delivery_options(self.agents[mover],self.agents[partner]):
+                for quantity in self.package_quantities(mover,partner,drop,partner_drop):
+                    yield self._proposal(mover,partner,drop,partner_drop,delivery,quantity)
+            return
         seller = self.agents[mover if self.agents[mover]["role"] == "seller" else partner]
         timed = seller.get("time_price")
         for delivery in segments(self.agents[mover]["interval"],
                                  self.agents[partner]["interval"], timed[0] if timed else None):
             yield self._proposal(mover, partner, drop, partner_drop, delivery)
+
+    def package_quantities(self, mover, partner, drop, partner_drop):
+        maximum = min(self.free_wh(mover)+(drop['wh'] if drop else 0),
+            self.free_wh(partner)+(partner_drop['wh'] if partner_drop else 0),
+            self.cap_free+(drop['wh'] if drop else 0)+(partner_drop['wh'] if partner_drop else 0))
+        maximum -= maximum % ENERGY_TICK_WH
+        sizes = {maximum}
+        for aid in (mover,partner):
+            state = self.agents[aid]
+            if state['preferences']:
+                sizes.add(state['preferences']['quantity_wh'])
+            if state.get('cond'):
+                sizes.add(state['cond'][1])
+        return sorted(q for q in sizes if 0 < q <= maximum and q % ENERGY_TICK_WH == 0)
 
     def candidates(self, mover):
         """Ranked admissible proposals for one agent, plus blocking reasons."""
@@ -780,6 +820,7 @@ class _Run:
         def rank(p):
             return (-p["gain"], 0 if p["drop"] is None else 1,
                     0 if memory_on and p["partner"] in m["preferred"] else 1,
+                    preference_penalty(m,p['wh'],p['delivery']),
                     p["partner"], p["drop"]["id"] if p["drop"] else "")
         ranked = sorted(found.values(), key=rank)
         if not ranked and not blocked:
@@ -888,6 +929,8 @@ class _Run:
         The model selected the trajectories, not the outcomes. Each quote is
         executed against current quantities, budgets, delivery terms and prices.
         """
+        if any(self.agents[aid]['preferences'] for aid in (original['mover'],original['partner'])):
+            return self.bargain_packages(original,cause)
         p = dict(original)
         counts = {p["mover"]: 0, p["partner"]: 0}
         actor, receiver = p["mover"], p["partner"]
@@ -966,6 +1009,167 @@ class _Run:
                   delivery_end=p["delivery"][1] if p["delivery"] else None,
                   strategy_plan_hash=self.plan_hash, rejection_key=list(self.proposal_key(original)))
         self.record_rejection(original, reason)
+        return False
+
+    def package_price(self, actor, p, step):
+        floor = effective_floor_paise(self.agents[p['seller']],p['wh'],p['delivery'][0] if p['delivery'] else None)
+        return preference_quote(self.agents[actor],floor,self.agents[p['buyer']]['maximum'],self.tick,
+            self.plan['agents'][actor]['price_positions'][step],p['wh'],p['delivery'])
+
+    def counter_package(self, original, actor, step):
+        """Finite packages; reprice each quantity after affordability changes."""
+        choices = []
+        for delivery in delivery_options(self.agents[original['mover']],self.agents[original['partner']]):
+            if delivery is None:
+                continue
+            for size in self.package_quantities(original['mover'],original['partner'],original['drop'],original['expect_partner_drop']):
+                p = dict(original,wh=size,delivery=delivery)
+                answer = None
+                for _ in range(5):
+                    price = self.package_price(actor,p,step)
+                    if price is None or p['wh'] <= 0:
+                        break
+                    p['paise'] = price
+                    answer = self.respond(p)
+                    if answer['decision']=='reject':
+                        break
+                    budget_drop = p['drop'] if p['mover']==p['buyer'] else answer['displace']
+                    budget = self.free_budget(p['buyer'])+(budget_drop['payment'] if budget_drop else 0)
+                    bounded = min(p['wh'],answer['wh'],affordable_wh(budget,price))
+                    if bounded == p['wh']:
+                        seller = self.agents[p['seller']]
+                        regular = effective_floor_paise(dict(seller,cond=None),bounded,delivery[0])
+                        p['bundle'] = bool(seller['cond'] and bounded>=seller['cond'][1] and price<regular)
+                        actor_drop = p['drop'] if actor==p['mover'] else answer['displace']
+                        gain = self.surplus(actor,bounded,price,*delivery)-(self.trade_surplus(actor,actor_drop) if actor_drop else 0)
+                        problems = self.checked_terms(p,bounded,answer['displace'])
+                        # A receiver may dislike this package. Physical and money
+                        # constraints must still hold before it can be offered.
+                        if gain >= (EPSILON_RAW if actor==p['mover'] or actor_drop else 0) and not any(
+                                problem not in ('not_improving','responder_not_improving') for problem in problems):
+                            penalty = preference_penalty(self.agents[actor],bounded,delivery)
+                            choices.append((-gain,penalty,-bounded,delivery,price,p))
+                        break
+                    p['wh'] = bounded
+        return min(choices,key=lambda item:item[:-1])[-1] if choices else None
+
+    @staticmethod
+    def package_terms(p):
+        return {'quantity_kwh':kwh(p['wh']),'price':inr(p['paise']),
+                'delivery_start':p['delivery'][0] if p['delivery'] else None,
+                'delivery_end':p['delivery'][1] if p['delivery'] else None}
+
+    def package_explanation(self, actor, p, step, previous, previous_id, kind):
+        own = self.agents[actor]
+        changed = []
+        same = self.package_price(actor,previous,step) if previous and previous['delivery'] else None
+        blocked_reference = None
+        if previous and same is not None:
+            own_drop = previous['drop'] if actor==previous['mover'] else previous['expect_partner_drop']
+            available = self.free_wh(actor)+(own_drop['wh'] if own_drop else 0)
+            if previous['wh']>available:
+                same,blocked_reference = None,'amount_unavailable'
+            elif own['role']=='buyer' and payment_paise(previous['wh'],same) > self.free_budget(actor)+(own_drop['payment'] if own_drop else 0):
+                same,blocked_reference = None,'over_budget'
+        if previous:
+            changed = [field for field,old,new in (
+                ('price',previous['paise'],p['paise']),('quantity',previous['wh'],p['wh']),
+                ('delivery',previous['delivery'],p['delivery'])) if old!=new]
+        pref = own['preferences']
+        compromises = []
+        if pref:
+            if pref['window'] and not contains(pref['window'],p['delivery'] or ()):
+                compromises.append('delivery')
+            if (pref['quantity_direction']=='at_least' and p['wh']<pref['quantity_wh'] or
+                    pref['quantity_direction']=='at_most' and p['wh']>pref['quantity_wh']):
+                compromises.append('quantity')
+        objection = blocked_reference
+        if previous and same is not None:
+            if own['role']=='buyer' and previous['paise']>same:
+                objection = 'price_too_high'
+            elif own['role']=='seller' and previous['paise']<same:
+                objection = 'price_too_low'
+        details = {'version':1,'kind':kind,'previous_offer_id':previous_id if previous else None,
+            'previous_terms':self.package_terms(previous) if previous else None,'changed':changed,
+            'same_terms_quote':inr(same) if same is not None else None,'objection':objection,
+            'compromises':compromises,
+            'preference_cost':raw_inr(preference_penalty(own,p['wh'],p['delivery'])*p['wh'])}
+        amount = f"{kwh(p['wh']):g} kWh at ₹{inr(p['paise']):.2f}/kWh"
+        if kind=='accept':
+            reason = f'That works for me. I accept {amount}.'
+            if compromises:
+                reason += ' The price compensates for a less preferred '+('time and amount' if len(compromises)==2 else 'delivery time' if compromises[0]=='delivery' else 'deal size')+'.'
+        else:
+            opening = ('That price is too high for my current target. ' if objection=='price_too_high' else
+                       'That price is too low for my current target. ' if objection=='price_too_low' else
+                       'I need a different offer to stay within my budget. ' if objection=='over_budget' else
+                       'That amount is more than I have available for this deal. ' if objection=='amount_unavailable' else '')
+            verb = 'buy' if own['role']=='buyer' else 'sell'
+            reason = opening+f'I can {verb} {amount} in this delivery window.'
+            dimensions = [v for v in changed if v!='price']
+            if dimensions and same is not None and same!=p['paise']:
+                terms = 'time and amount' if len(dimensions)==2 else 'time' if dimensions[0]=='delivery' else 'amount'
+                reason += f' For the previous {terms}, my quote would be ₹{inr(same):.2f}/kWh.'
+        return details,reason
+
+    def bargain_packages(self, original, cause):
+        counts = {original['mover']:0,original['partner']:0}
+        actor,receiver = original['mover'],original['partner']
+        p,previous,last = dict(original),None,cause
+        reason = 'strategy_exhausted'
+        for exchange in range(6):
+            step = counts[actor]
+            if exchange:
+                p = self.counter_package(original,actor,step)
+                if p is None:
+                    # The receiver of the preceding offer is the refusing home.
+                    actor,receiver = receiver,actor
+                    p = previous
+                    reason = 'no_feasible_counteroffer'
+                    break
+            if not self.can_message():
+                return False
+            details,description = self.package_explanation(actor,p,step,previous,last,'opening' if exchange==0 else 'counter')
+            visible = dict(p)
+            if visible['delivery'] is None:
+                visible['delivery'] = self.agents[actor]['interval']
+            last = self.emit('offer_sent' if exchange==0 else 'counteroffer_sent',actor,receiver,
+                description,'preference_quote',[last],**self.package_terms(visible),negotiation=details,
+                strategy_plan_hash=self.plan_hash,strategy_step=step,
+                price_position=self.plan['agents'][actor]['price_positions'][step],
+                replaces_trade_id=p['drop']['id'] if p['drop'] else None)
+            counts[actor] += 1
+            previous = dict(p)
+            if p['delivery'] is None:
+                p = visible
+                reason = 'interval_mismatch'
+                break
+            answer = self.respond(p)
+            aspiration = self.package_price(receiver,p,min(counts[receiver],2))
+            acceptable = aspiration is not None and (p['paise']>=aspiration if self.agents[receiver]['role']=='seller' else p['paise']<=aspiration)
+            problems = self.checked_terms(p,p['wh'],answer.get('displace')) if answer['decision']!='reject' else [answer['reason_code']]
+            if answer.get('wh')==p['wh'] and acceptable and not problems:
+                if not self.can_message():
+                    return False
+                details,description = self.package_explanation(receiver,p,min(counts[receiver],2),p,last,'accept')
+                accepted = self.emit('offer_accepted',receiver,actor,description,'preference_accepted',[last],
+                    **self.package_terms(p),negotiation=details,strategy_plan_hash=self.plan_hash,
+                    rule_checks=['all_constraints_passed','preference_adjusted_gain_passed'])
+                self.reserve(p,p['wh'],receiver,accepted,p['drop'],answer['displace'])
+                self.last_decision[p['mover']] = f"reserved with {p['partner']}"
+                self.last_decision[p['partner']] = f"accepted {p['mover']}"
+                return True
+            if counts[receiver]>=3 or 'deadline_passed' in problems:
+                reason = problems[0] if problems else 'strategy_exhausted'
+                break
+            actor,receiver = receiver,actor
+        if not self.can_message():
+            return False
+        self.emit('offer_rejected',receiver,actor,'I cannot agree to this offer within my requirements and the remaining negotiation steps.',reason,
+            [last],**self.package_terms(p),negotiation={'version':1,'kind':'reject','previous_offer_id':last,
+            'previous_terms':self.package_terms(p),'changed':[],'objection':reason},
+            strategy_plan_hash=self.plan_hash,rejection_key=list(self.proposal_key(original)))
+        self.record_rejection(original,reason)
         return False
 
     # -- transitions --
@@ -1541,7 +1745,7 @@ def run_experiment(config, intervention=None, world=None, strategy_plan=None, *,
         "intervention": copy.deepcopy(intervention), "scenario": scenario,
         "changed_fields": changed_fields,
         "price_rule": PRICE_RULE if cfg["negotiation_mode"] == "midpoint" else
-            "bounded alternating price quotes from the frozen strategy plan; accepted quote sets price",
+            "bounded alternating quotes from the frozen strategy plan; households with soft preferences can counter on delivery and quantity; accepted quote sets all trade terms",
         "strategy_plan": strategy_plan, "strategy_plan_hash": fingerprint(strategy_plan, checksum_version),
         "energy_model": "One flexible energy pool per household over its delivery window; no power, device or per-hour generation limits.",
         "utility_formula": UTILITY_FORMULA,
