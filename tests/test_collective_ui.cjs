@@ -445,6 +445,70 @@ function snapshotFixture(f) {
   `);
 }
 
+function preferenceMessage(f, metadata = true) {
+  f.evaluate(`
+    const prior={quantity_kwh:4,price:7.5,delivery_start:'2026-11-01T14:00:00+05:30',delivery_end:'2026-11-01T15:00:00+05:30'};
+    const offer={id:'ev-2',type:'counteroffer_sent',actor_id:'A17',counterparty_id:'A02',round:1,quantity_kwh:2,price:7,delivery_start:'2026-11-01T15:00:00+05:30',delivery_end:'2026-11-01T16:00:00+05:30',reason_code:'preference_quote',reason:'I can offer a lower price at this time. <script>unsafe</script>'};
+    if(${metadata})offer.negotiation={version:1,kind:'counter',previous_offer_id:'ev-1',previous_terms:prior,changed:['price','quantity','delivery'],same_terms_quote:8,compromises:['quantity'],preference_cost:1};
+    state.result.baseline={events:[offer],trades:[]};state.view='baseline';state.index=0;state.stage=null;
+    renderConversation();
+  `);
+}
+
+test('counteroffer history shows actual price, amount and delivery changes with a separate same-home comparison', () => {
+  const f=fixture();preferenceMessage(f);
+  const html=f.element('conversation').innerHTML;
+  assert.match(html,/₹7\.50 → ₹7\.00\/kWh/);
+  assert.match(html,/4\.00 → 2\.00 kWh/);
+  assert.match(html,/Different time/);
+  assert.match(html,/Why this offer/);
+  assert.match(html,/Previous offer.*2–3 PM.*New offer.*3–4 PM/s);
+  assert.match(html,/this home.*previous time and amount.*₹8\.00\/kWh/i);
+  assert.match(html,/I can offer a lower price at this time\. &lt;script&gt;unsafe&lt;\/script&gt;/);
+  assert.doesNotMatch(html,/<script>/);
+});
+
+test('history does not invent preference changes or hypothetical quotes when they are not recorded', () => {
+  const f=fixture();preferenceMessage(f,false);
+  assert.doesNotMatch(f.element('conversation').innerHTML,/Different time|Why this offer|Accepted a different|previous time and amount/);
+  f.evaluate(`state.result.baseline.events=[{...state.result.baseline.events[0],negotiation:{version:1,kind:'counter',previous_terms:{quantity_kwh:4,price:7.5},changed:['quantity'],same_terms_quote:null,compromises:[]}}];renderConversation();`);
+  assert.match(f.element('conversation').innerHTML,/4\.00 → 2\.00 kWh/);
+  assert.doesNotMatch(f.element('conversation').innerHTML,/this home.*previous time and amount/i);
+});
+
+test('acceptance explains recorded compromises and does not present preference cost as an extra fee', () => {
+  const f=fixture();preferenceMessage(f);
+  f.evaluate(`state.result.baseline.events=[{...state.result.baseline.events[0],type:'offer_accepted',reason_code:'preference_accepted',reason:'The price compensates for a less preferred delivery time.',negotiation:{version:1,kind:'accept',changed:[],previous_terms:null,compromises:['delivery','quantity'],preference_cost:2}}];renderConversation();`);
+  const html=f.element('conversation').innerHTML;
+  assert.match(html,/Accepted a different time/);
+  assert.match(html,/Accepted a different amount/);
+  assert.match(html,/Modeled preference cost: ₹2\.00/);
+  assert.match(html,/not an extra payment/i);
+  assert.doesNotMatch(html,/₹7\.50 →/);
+});
+
+test('preference details follow historical windows and remain separate from firm limits', () => {
+  const f=fixture();snapshotFixture(f);
+  f.evaluate(`
+    const preferences={price_target:7,delivery:'later',time_premium:0.5,preferred_quantity_kwh:3,quantity_direction:'at_least',quantity_premium:0.25};
+    Object.assign(state.result.world.agents[0],{negotiation_preferences:preferences,interval_start:'2026-11-01T14:00:00+05:30',interval_end:'2026-11-01T16:00:00+05:30'});
+    Object.assign(state.result.updated_world.agents[0],{negotiation_preferences:preferences,interval_start:'2026-11-01T18:00:00+05:30',interval_end:'2026-11-01T20:00:00+05:30'});
+    renderReplayContext();renderInspector();
+  `);
+  for(const id of ['focus-home','inspection']) {
+    const html=f.element(id).innerHTML;
+    assert.match(html,/Firm limits.*Flexible preferences/s);
+    assert.match(html,/Price aim.*₹7\.00\/kWh.*negotiable/s);
+    assert.match(html,/Preferred delivery.*3–4 PM/s);
+    assert.match(html,/Preferred amount.*At least 3\.00 kWh per agreement/s);
+    assert.match(html,/not extra payments/i);
+    assert.doesNotMatch(html,/7–8 PM/);
+  }
+  f.evaluate("state.stage='requirement';renderReplayContext();renderInspector();");
+  assert.match(f.element('focus-home').innerHTML,/Preferred delivery.*7–8 PM/s);
+  assert.match(f.element('inspection').innerHTML,/Preferred delivery.*7–8 PM/s);
+});
+
 test('starting agreements use original profiles in both inspection and node availability', () => {
   const f=fixture();snapshotFixture(f);
   f.evaluate("renderInspector();$('role-filter').value='all';drawGraph($('graph'),frameTrades(),null,'Starting');");
