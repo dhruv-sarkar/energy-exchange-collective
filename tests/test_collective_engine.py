@@ -450,7 +450,7 @@ class GeneratedWorldTests(unittest.TestCase):
         self.assertEqual(len(open_world["discovery_edges"]), 25 * 25)
         self.assertEqual(sorted(world["private_fields"]),
                          ["budget", "conditional_price", "context", "forecast_surplus_kwh",
-                          "memory", "reserve_kwh"])
+                          "memory", "negotiation_preferences", "reserve_kwh"])
 
     def test_different_seed_gives_different_world(self):
         a = engine.build_world(config(population=20, seed=42))

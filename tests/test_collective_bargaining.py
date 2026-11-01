@@ -228,7 +228,9 @@ class BargainingTests(unittest.TestCase):
         self.assertGreater(len({(a['interval_start'], a['interval_end']) for a in world['agents']}), 1)
         by_id = {a['id']: a for a in world['agents']}
         original_by_id = {a['id']: a for a in original['agents']}
-        self.assertEqual(by_id['A17'], original_by_id['A17'])
+        self.assertTrue(by_id['A17']['negotiation_preferences'])
+        self.assertEqual({k:v for k,v in by_id['A17'].items() if k != 'negotiation_preferences'},
+                         {k:v for k,v in original_by_id['A17'].items() if k != 'negotiation_preferences'})
         self.assertEqual(by_id['A20']['interval_start'], '2026-10-28T20:00:00+05:30')
         self.assertEqual(by_id['A15']['time_price']['after'], '2026-10-28T21:00:00+05:30')
         self.assertEqual(world['interval']['end'], '2026-10-28T22:00:00+05:30')

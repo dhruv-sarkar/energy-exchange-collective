@@ -26,9 +26,10 @@ from datetime import timedelta
 from .collective_time import validate_interval, contains, parse_time, segments
 
 from .collective_bargaining import (default_strategy_plan, validate_strategy_plan, quote_price)
+from .collective_preferences import preferred_window, preference_penalty, preference_quote, delivery_options
 
 PROTOCOL_VERSION = "collective-bilateral-v2"
-ENGINE_VERSION = "0.2.1"
+ENGINE_VERSION = "0.3.0"
 CHECKSUM_VERSION = "canonical-json-numbers-v2"
 LEGACY_CHECKSUM_VERSION = "python-json-v1"
 STATUSES = ("locally_stable", "round_limited", "cycle_detected", "unresolved")
@@ -44,7 +45,7 @@ EPSILON_RAW = 1000  # one paise, in paise times watt hours per kWh units
 RAW_PER_INR = 100_000
 
 PRIVATE_FIELDS = ["budget", "conditional_price", "context",
-                  "forecast_surplus_kwh", "memory", "reserve_kwh"]
+                  "forecast_surplus_kwh", "memory", "reserve_kwh", "negotiation_preferences"]
 MESSAGE_TYPES = ("offer_sent", "counteroffer_sent", "offer_rejected", "offer_accepted")
 RESERVATION_TYPES = ("provisional_reserved", "provisional_released",
                      "offer_replaced")
@@ -60,10 +61,12 @@ CONFIG_KEYS = {"population", "seed", "topology", "max_rounds", "max_messages",
 PRICE_RULE = ("midpoint of the seller's effective floor and the buyer's maximum,"
               " rounded half up to the price tick and clamped into that band;"
               " payment rounded half up to whole paise")
-UTILITY_FORMULA = ("surplus_v1: seller utility = sum over its trades of"
+UTILITY_FORMULA = ("surplus_v2: seller utility = sum over its trades of"
                    " (price - effective floor) x quantity; buyer utility = sum of"
-                   " (maximum price - price) x quantity; no shortfall or missed"
-                   " requirement penalty; welfare = sum of both, so transfers cancel")
+                   " (maximum price - price) x quantity; each side subtracts its"
+                   " optional time and quantity preference premiums x quantity;"
+                   " premiums are modeled preference costs, not payments; no shortfall"
+                   " penalty; welfare sums both utilities, so transfers cancel")
 ADMISSIBLE_MOVES = ("fill within free capacity; replacement of one of the mover's own"
                     " trades; acceptance by releasing one of the responder's own"
                     " trades; one provisional trade per seller and buyer pair; the"
@@ -250,7 +253,7 @@ def make_agent(agent_id, role, **fields):
         "forecast_surplus_kwh": None, "reserve_kwh": None, "max_offer_kwh": None,
         "min_price": None, "conditional_price": None, "time_price": None,
         "demand_kwh": None, "max_price": None, "budget": None,
-        "deadline_round": None, "memory": [],
+        "deadline_round": None, "memory": [], "negotiation_preferences": None,
     }
     unknown = sorted(set(fields) - set(agent))
     if unknown:
@@ -383,6 +386,20 @@ def build_world(config):
                 agent["time_price"] = {"after": (start + timedelta(hours=1)).isoformat(),
                                        "floor": inr(floor)}
             agent["context"] += " Energy is freely shiftable within its delivery window, subject to one total household pool."
+        for i, agent in enumerate(agents, 1):
+            # Independent RNG keeps hard profiles stable when preferences evolve.
+            rng = _agent_rng(cfg['seed'] + 771, i)
+            selling = agent['role'] == 'seller'
+            limit = to_paise(agent['min_price'] if selling else agent['max_price'], 'price')
+            offset = rng.choice([50, 75, 100])
+            target = max(0, round((limit + (offset if selling else -offset)) / _tick) * _tick)
+            quantity = agent['max_offer_kwh'] if selling else agent['demand_kwh']
+            agent['negotiation_preferences'] = {
+                'price_target': inr(target), 'delivery': rng.choice(['earlier', 'later', 'any']),
+                'time_premium': inr((rng.choice([25, 50, 75]) // _tick) * _tick),
+                'preferred_quantity_kwh': max(.01, round(quantity * rng.choice([.5, .75, 1]) * 100) / 100),
+                'quantity_direction': 'at_least' if selling else rng.choice(['at_least', 'at_most']),
+                'quantity_premium': inr((rng.choice([25, 50, 75]) // _tick) * _tick)}
     return make_world(agents, cfg)
 
 
@@ -394,6 +411,25 @@ def agent_state(agent, tick=5):
              "interval": validate_interval(agent["interval_start"], agent["interval_end"]),
              "deadline": agent.get("deadline_round"),
              "preferred": [], "memory_ids": {}}
+    pref = agent.get('negotiation_preferences')
+    state['preferences'] = None
+    if pref is not None:
+        keys = {'price_target', 'delivery', 'time_premium', 'preferred_quantity_kwh',
+                'quantity_direction', 'quantity_premium'}
+        if not isinstance(pref, dict) or set(pref) != keys:
+            raise ValueError(f'{label}: negotiation_preferences needs exactly {sorted(keys)}')
+        if pref['delivery'] not in ('earlier', 'later', 'any') or pref['quantity_direction'] not in ('at_least', 'at_most'):
+            raise ValueError(f'{label}: invalid delivery or quantity preference')
+        normalized = {key: to_paise(pref[key], f'{label}.{key}')
+                      for key in ('price_target', 'time_premium', 'quantity_premium')}
+        if any(value % tick for value in normalized.values()):
+            raise ValueError(f'{label}: preference prices must be on the price tick')
+        amount = to_wh(pref['preferred_quantity_kwh'], f'{label}.preferred_quantity_kwh')
+        if amount <= 0 or amount % ENERGY_TICK_WH:
+            raise ValueError(f'{label}: preferred quantity must be positive and on the energy tick')
+        state['preferences'] = dict(normalized, quantity_wh=amount,
+            quantity_direction=pref['quantity_direction'],
+            window=preferred_window(state['interval'], pref['delivery']))
     if not isinstance(state["interval"][0], str) or not isinstance(state["interval"][1], str):
         raise ValueError(f"{label}: interval bounds must be strings")
     deadline = state["deadline"]
@@ -561,14 +597,15 @@ class _Run:
     def free_budget(self, aid):
         return self.agents[aid]["budget"] - self.spent(aid)
 
-    def surplus(self, aid, wh, price, delivery_start=None):
+    def surplus(self, aid, wh, price, delivery_start=None, delivery_end=None):
         a = self.agents[aid]
+        penalty = preference_penalty(a, wh, (delivery_start, delivery_end) if delivery_start and delivery_end else None)
         if a["role"] == "seller":
-            return (price - effective_floor_paise(a, wh, delivery_start)) * wh
-        return (a["maximum"] - price) * wh
+            return (price - effective_floor_paise(a, wh, delivery_start) - penalty) * wh
+        return (a["maximum"] - price - penalty) * wh
 
     def trade_surplus(self, aid, trade):
-        return self.surplus(aid, trade["wh"], trade["paise"], trade["delivery_start"])
+        return self.surplus(aid, trade["wh"], trade["paise"], trade["delivery_start"], trade["delivery_end"])
 
     def utility(self, aid):
         return sum(self.trade_surplus(aid, t) for t in self.trades_of(aid))
@@ -687,10 +724,10 @@ class _Run:
         q -= q % ENERGY_TICK_WH
         if q <= 0 or (bundle and q < s["cond"][1]):
             return None
-        gain = self.surplus(mover, q, price, delivery_start) - (self.trade_surplus(mover, drop) if drop else 0)
+        gain = self.surplus(mover, q, price, delivery_start, delivery[1] if delivery else None) - (self.trade_surplus(mover, drop) if drop else 0)
         if gain < EPSILON_RAW:
             return None
-        partner_gain = self.surplus(partner, q, price, delivery_start) - (
+        partner_gain = self.surplus(partner, q, price, delivery_start, delivery[1] if delivery else None) - (
             self.trade_surplus(partner, partner_drop) if partner_drop else 0)
         if partner_gain < (EPSILON_RAW if partner_drop else 0):
             return None
@@ -785,7 +822,7 @@ class _Run:
 
         q_a, why_a = bounded(0, 0)
         if q_a > 0:
-            options.append((self.surplus(partner, q_a, price, p["delivery"][0]), 0, "", q_a, None, why_a))
+            options.append((self.surplus(partner, q_a, price, *p["delivery"]), 0, "", q_a, None, why_a))
         elif why_a:
             reasons.append(why_a)
         for trade in sorted(self.trades_of(partner),
@@ -793,7 +830,7 @@ class _Run:
             q_b, why_b = bounded(trade["wh"], trade["payment"])
             if q_b <= 0:
                 continue
-            gain = self.surplus(partner, q_b, price, p["delivery"][0]) - self.trade_surplus(partner, trade)
+            gain = self.surplus(partner, q_b, price, *p["delivery"]) - self.trade_surplus(partner, trade)
             if gain >= EPSILON_RAW:
                 options.append((gain, 1, trade["id"], q_b, trade, why_b))
         if not options:
@@ -807,7 +844,7 @@ class _Run:
                 "reason_code": why or "not_improving"}
 
     def mover_accepts(self, p, q):
-        gain = self.surplus(p["mover"], q, p["paise"], p["delivery"][0]) - (
+        gain = self.surplus(p["mover"], q, p["paise"], *p["delivery"]) - (
             self.trade_surplus(p["mover"], p["drop"]) if p["drop"] else 0)
         if gain >= EPSILON_RAW:
             return None

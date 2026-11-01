@@ -25,7 +25,7 @@ from .collective_policy import parse_instruction, validate_policy_changes
 
 MODEL = 'gpt-6-luna'
 TRANSLATOR_VERSION = 'household-translator-v3'
-PLANNER_VERSION = 'household-price-planner-v2'
+PLANNER_VERSION = 'household-price-planner-v3'
 ENDPOINT = 'https://api.openai.com/v1/responses'
 ALLOWED_MODELS = {'gpt-6-luna'}
 FIELDS = ['min_price', 'max_price', 'budget', 'max_offer_kwh',
@@ -104,6 +104,9 @@ a feasible seller-floor to buyer-ceiling band. Sellers concede down, buyers conc
 Do not calculate money or output free-form quote positions. These soft strategies never change hard budgets,
 demand, reserves, availability or floor/ceiling. A small budget is not itself permission to change the price band.
 The engine recalculates prices from actual delivery windows, time-specific floors and remaining energy at every turn.
+When negotiation_preferences is present, its price target anchors aspirations. Its time and quantity premiums
+value soft preferences and guide package counteroffers; they are not fees or permission to change hard limits.
+Use these explicit preferences when choosing the stance. Do not invent a new preference or rewrite one.
 No dialogue, fabricated events, tools or code. The same frozen plan is used before and after a household intervention."""
 
 
@@ -514,7 +517,7 @@ def prepare_strategy_plan(world, *, client=None):
     # never enter the key. All later interventions reuse this exact artifact.
     context = {'strategy_catalog':STRATEGY_CATALOG,
                'agents':[{k:a.get(k) for k in ['id','role','context','min_price','max_price',
-                   'budget','reserve_kwh','max_offer_kwh','demand_kwh','time_price']}
+                   'budget','reserve_kwh','max_offer_kwh','demand_kwh','time_price','negotiation_preferences']}
                          for a in world['agents']]}
     final_key = 'plan:' + _hash([PLANNER_VERSION, client.model, world])
     with client.locked_db() as db:

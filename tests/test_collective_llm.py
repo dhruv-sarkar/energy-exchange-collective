@@ -291,6 +291,14 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(self.calls), 1)
 
+    def test_strategy_planner_receives_explicit_soft_preferences(self):
+        from tests.test_collective_preferences import preferences
+        self.world['agents'][0]['negotiation_preferences'] = preferences()
+        rows = [{'id':a['id'], 'stance':'balanced'} for a in self.world['agents']]
+        self.mod.prepare_strategy_plan(self.world, client=self.client({'agents':rows}))
+        payload = json.loads(self.calls[0]['input'])
+        self.assertEqual(payload['agents'][0]['negotiation_preferences'], preferences())
+
     def test_model_cannot_drop_an_unsupported_condition(self):
         phrase = 'sell 3 kWh unless it rains'
         result = self.mod.translate_instruction(phrase, self.agent,
