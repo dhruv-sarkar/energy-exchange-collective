@@ -239,6 +239,38 @@ class PackageNegotiationTests(unittest.TestCase):
         self.assertEqual(result['baseline']['metrics']['committed_kwh'],8)
         self.assertEqual(engine.verify_result(result),[])
 
+    def test_replacement_explanation_uses_budget_released_by_actual_response(self):
+        def prefs(target):
+            return preferences(price_target=target,delivery='any',time_premium=0,quantity_premium=0)
+        result = package_experiment([
+            household('A01',min_price=7.5,prefs=prefs(8)),
+            household('A02',min_price=5,prefs=prefs(7)),
+            household('A03','buyer',demand_kwh=8,budget=36,prefs=prefs(6))])
+        events = result['baseline']['events']
+        released = next(e['trade'] for e in events if e['type']=='provisional_released')
+        self.assertEqual((released['seller_id'],released['quantity_kwh'],released['price']),('A01',4,7.9))
+        counter = next(e for e in events if e['type']=='counteroffer_sent' and
+                       e['actor_id']=='A03' and e['counterparty_id']=='A02')
+        self.assertEqual((counter['quantity_kwh'],counter['price']),(4,6))
+        self.assertEqual(counter['negotiation']['same_terms_quote'],6)
+        self.assertEqual(counter['negotiation']['objection'],'price_too_high')
+        self.assertNotIn('budget',counter['reason'])
+        accepted = next(e for e in events if e['type']=='offer_accepted' and
+                        e['actor_id']=='A03' and e['counterparty_id']=='A02')
+        self.assertNotEqual(accepted['negotiation']['objection'],'over_budget')
+        self.assertEqual(engine.verify_result(result),[])
+
+    def test_affordable_acceptance_does_not_object_to_a_higher_hypothetical_quote(self):
+        result = package_experiment([
+            household('A01',prefs=preferences(price_target=7,delivery='any',time_premium=0,quantity_premium=0)),
+            household('A02','buyer',budget=28,prefs=preferences(price_target=6,delivery='any',time_premium=0,quantity_premium=0))])
+        accepted = next(e for e in result['baseline']['events'] if e['type']=='offer_accepted')
+        self.assertEqual((accepted['quantity_kwh'],accepted['price']),(4,6.6))
+        self.assertLessEqual(accepted['quantity_kwh']*accepted['price'],28)
+        self.assertIsNone(accepted['negotiation']['objection'])
+        self.assertIsNone(accepted['negotiation']['same_terms_quote'])
+        self.assertEqual(engine.verify_result(result),[])
+
     def test_hard_window_intervention_repairs_trades_and_keeps_other_preferences(self):
         result = package_experiment(intervention={'agent_id':'A02','scenario':'custom','changes':{
             'interval_start':'2026-10-28T20:00:00+05:30','interval_end':'2026-10-28T22:00:00+05:30'}})

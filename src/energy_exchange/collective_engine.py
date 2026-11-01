@@ -1062,10 +1062,16 @@ class _Run:
     def package_explanation(self, actor, p, step, previous, previous_id, kind):
         own = self.agents[actor]
         changed = []
-        same = self.package_price(actor,previous,step) if previous and previous['delivery'] else None
+        # Acceptance concerns the affordable recorded offer, not a hypothetical
+        # higher quote that the accepting home would have made itself.
+        same = self.package_price(actor,previous,step) if previous and previous['delivery'] and kind!='accept' else None
         blocked_reference = None
         if previous and same is not None:
-            own_drop = previous['drop'] if actor==previous['mover'] else previous['expect_partner_drop']
+            # Resolve the same-price hypothetical response, including the actual
+            # replacement it would choose. The candidate's expected drop is only
+            # a search hint and can omit a budget-releasing agreement.
+            own_drop = previous['drop'] if actor==previous['mover'] else self.respond(
+                dict(previous,paise=same)).get('displace')
             available = self.free_wh(actor)+(own_drop['wh'] if own_drop else 0)
             if previous['wh']>available:
                 same,blocked_reference = None,'amount_unavailable'
